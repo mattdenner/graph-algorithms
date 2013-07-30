@@ -31,9 +31,30 @@
         (out-of v u) [u [u v d]]))
     ))
 
-; And here's the empty tree
-(def empty-tree
-  {:vertices '(), :edges '()})
+; Here are some simple constants for graphs and paths
+(def empty-tree {:vertices '(), :edges '()})
+(def length-of-unknown-path (Long/MAX_VALUE))
+
+(defprotocol GraphWalker
+  "Functions that determine the shortest path between two vertices i and j in a graph return instances
+  instances of this protocol."
+
+  (distance-between [walker i j] "Returns the shortest distance between vertices i and j, length-of-unknown-path if there is no path")
+  (path-between     [walker i j] "Returns the shortest path between vertices i and j, empty sequence if there is no path"))
+
+(defprotocol Router
+  "Routing between two vertices i and j in a graph can be controlled by an implementation of this protocol."
+
+  (acceptable? [this value check-against] "Returns true if value is acceptable under the current check-against value")
+  (operation   [this left right] "Returns the result of left and right put through the appropriate operation"))
+
+(defn- router [acceptor operation]
+  (reify Router
+    (acceptable? [_ v c] (acceptor v c))
+    (operation   [_ l r] (operation l r))))
+
+(def ^{:doc "Router for shortest path"} shortest-path (router < +))
+(def ^{:doc "Router for maximum flow"}  maximum-flow  (router > min))
 
 (defn minimum-spanning-tree-by-kruskal
   "Given a connected weighted undirected graph this function returns the minimum spanning tree determined by
@@ -78,3 +99,45 @@
           (recur
             (remove #(= edge %) sorted-edges)
             (add-branch (add-vertex current-tree vertex) edge)))))))
+
+(defn- all-triple-vertex-paths
+  "Generates all possible vertex triples that describe a path from i to j through k"
+  [vertices]
+  (for [k vertices
+        i (remove #(= % k) vertices)
+        j (remove #(some (partial = %) [k i]) vertices)]
+    [i k j]))
+
+(defn- prepare-floyd-warshall [{vertices :vertices, edges :edges} router]
+  (let [vertex-vertex-distance (apply hash-map (mapcat (fn [v] [[v,v] 0]) vertices))
+        distances              (reduce (fn [dist [u v d]] (assoc dist [u,v] d)) vertex-vertex-distance edges)
+        next-vertex            {}]
+    (reduce
+      (fn [[distances next-vertex :as current-state] [i k j]]
+        (let [distance-between (fn [u v] (get distances [u,v]))
+              d-i-j            (distance-between i j)
+              d-i-k            (distance-between i k)
+              d-k-j            (distance-between k j)]
+          (cond
+            (nil? d-i-k)                                              current-state
+            (nil? d-k-j)                                              current-state
+            (nil? d-i-j)                                              [(assoc distances [i,j] (operation router d-i-k d-k-j)) (assoc next-vertex [i,j] k)]
+            (acceptable? router (operation router d-i-k d-k-j) d-i-j) [(assoc distances [i,j] (operation router d-i-k d-k-j)) (assoc next-vertex [i,j] k)]
+            :default                                                  current-state
+            )))
+      [distances next-vertex]
+      (all-triple-vertex-paths vertices))))
+
+(defn floyd-warshall-graph-walker
+  "Given a directed weighted connected graph this function returns a GraphWalker that will give the path
+  information between two points, controlled by the Router.
+
+  The algorithm generates two sparse matrices: one records the distance between vertices i and j, the other
+  records a vertex k through which the path i-j passes."
+  [graph router]
+  (let [[distances next-vertex]   (prepare-floyd-warshall graph router)
+        intermediate-path-between (fn myself [i j] (let [k (get next-vertex [i,j])] (if (nil? k) [] (concat (myself i k) [k] (myself k j)))))]
+    (reify GraphWalker
+      (distance-between [_ i j] (get distances [i,j] length-of-unknown-path))
+      (path-between     [w i j] () (if (= (distance-between w i j) length-of-unknown-path) [] (concat [i] (intermediate-path-between i j) [j]))))
+    ))
